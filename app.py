@@ -1,10 +1,9 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import threading
 import socket
-from tkinter import simpledialog
 from vector_clock import VectorClock
-from message import create_message, parse_message
+from message import create_message, create_rename_message, parse_message
 
 class NodeApp:
     def __init__(self, root, node_id, all_nodes, port, peers):
@@ -23,7 +22,6 @@ class NodeApp:
         self.root.geometry("600x450")
         self.root.resizable(False, False)
 
-        # Entrées utilisateur
         frm_input = ttk.Frame(self.root)
         frm_input.pack(pady=10)
 
@@ -39,19 +37,15 @@ class NodeApp:
         ttk.Button(frm_input, text="Synchroniser", command=self.broadcast_data).grid(row=0, column=5)
         ttk.Button(frm_input, text="📝 Renommer", command=self.rename_node).grid(row=0, column=6, padx=5)
 
-
-        # Horloge vectorielle
         self.clock_label = ttk.Label(self.root, text="", font=("Courier", 10))
         self.clock_label.pack(pady=5)
 
-        # Données affichées
         frm_data = ttk.LabelFrame(self.root, text="Données stockées", padding=(10, 5))
         frm_data.pack(fill="both", expand=True, padx=10, pady=5)
 
         self.data_display = tk.Text(frm_data, height=8, wrap="none", bg="#f0f0f0")
         self.data_display.pack(fill="both", expand=True)
 
-        # Log des événements
         frm_log = ttk.LabelFrame(self.root, text="Journal des événements", padding=(10, 5))
         frm_log.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -61,10 +55,7 @@ class NodeApp:
         self.refresh_ui()
 
     def refresh_ui(self):
-        # Met à jour l'affichage de l'horloge
         self.clock_label.config(text=f"🕒 Horloge vectorielle locale : {self.vc}")
-
-        # Met à jour les données stockées
         self.data_display.delete("1.0", tk.END)
         for k, v in self.data.items():
             val = v['value']
@@ -88,6 +79,14 @@ class NodeApp:
                 self.handle_message(msg)
 
     def handle_message(self, msg):
+        if msg.get("type") == "rename":
+            old_id = msg["old_id"]
+            new_id = msg["new_id"]
+            self.vc.rename_node(old_id, new_id)
+            self.log_event(f"🔄 Nœud renommé (reçu) : {old_id} → {new_id}", "purple")
+            self.refresh_ui()
+            return
+
         sender = msg["sender"]
         clock = msg["clock"]
         key = msg["key"]
@@ -111,7 +110,8 @@ class NodeApp:
         self.refresh_ui()
 
     def happens_after(self, c1, c2):
-        return all(c1[k] >= c2[k] for k in c1) and any(c1[k] > c2[k] for k in c1)
+        return all(c1.get(k, 0) >= c2.get(k, 0) for k in c1) and any(c1.get(k, 0) > c2.get(k, 0) for k in c1)
+
 
     def set_key(self):
         key = self.key_entry.get().strip()
@@ -125,16 +125,34 @@ class NodeApp:
         self.log_event(f"📤 Mise à jour locale : {key} = {value}", "blue")
         self.refresh_ui()
 
-        msg = create_message(self.node_id, clock, key, value)
+        msg = create_message(self.node_id, clock, key, value, msg_type="data")
         for host, port in self.peers:
             self.send_message(host, port, msg)
 
     def broadcast_data(self):
         for key, val in self.data.items():
-            msg = create_message(self.node_id, val["clock"], key, val["value"])
+            msg = create_message(self.node_id, val["clock"], key, val["value"], msg_type="data")
             for host, port in self.peers:
                 self.send_message(host, port, msg)
         self.log_event("🔁 Synchronisation forcée avec les pairs", "purple")
+
+    def rename_node(self):
+        new_id = simpledialog.askstring("Renommer le nœud", "Nouveau nom du nœud :")
+        if new_id and new_id.strip() and new_id != self.node_id:
+            old_id = self.node_id
+            new_id = new_id.strip()
+
+            self.node_id = new_id
+            self.vc.rename_node(old_id, new_id)
+            self.root.title(f"Nœud {self.node_id}")
+            self.refresh_ui()
+            self.log_event(f"🔧 Nom modifié localement : {old_id} → {new_id}", "blue")
+
+            msg = create_rename_message(old_id, new_id)
+            for host, port in self.peers:
+                self.send_message(host, port, msg)
+        else:
+            messagebox.showinfo("Renommage", "Aucun changement effectué.")
 
     def send_message(self, host, port, msg):
         try:
@@ -144,16 +162,3 @@ class NodeApp:
             s.close()
         except:
             self.log_event(f"❌ Erreur d'envoi vers {host}:{port}", "gray")
-
-    def rename_node(self):
-        new_id = simpledialog.askstring("Renommer le nœud", "Nouveau nom du nœud :")
-        if new_id and new_id.strip() and new_id != self.node_id:
-            old_id = self.node_id
-            self.node_id = new_id.strip()
-            self.vc.node_id = self.node_id
-            self.root.title(f"Nœud {self.node_id}")
-            self.refresh_ui()
-            self.log_event(f"🔧 Nom du nœud modifié : {old_id} → {self.node_id}", "blue")
-        else:
-            messagebox.showinfo("Renommage", "Aucun changement effectué.")
-
