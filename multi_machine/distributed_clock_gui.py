@@ -57,6 +57,16 @@ def create_rename_message(old_id, new_id, password=None):
         "password": password
     }).encode()
 
+def create_conflict_resolution_message(sender, key, value, clock, password=None):
+    return json.dumps({
+        "type": "conflict_resolution",
+        "sender": sender,
+        "key": key,
+        "value": value,
+        "clock": clock,
+        "password": password
+    }).encode()
+
 def parse_message(raw_data):
     return json.loads(raw_data.decode())
 
@@ -223,7 +233,6 @@ class NodeApp:
                 old_id = msg["old_id"]
                 new_id = msg["new_id"]
                 self.vc.rename_node(old_id, new_id)
-                # Si le noeud renommé est local, mettre à jour la config
                 if old_id == self.node_id:
                     self.node_id = new_id
                     self.config["node_id"] = new_id
@@ -235,6 +244,16 @@ class NodeApp:
                 self.save_config()
                 return
 
+            elif msg.get("type") == "conflict_resolution":
+                key = msg["key"]
+                value = msg["value"]
+                clock = msg["clock"]
+                self.data[key] = {"value": value, "clock": clock}
+                self.log_event(f"🛠️ Conflit résolu à distance : {key} = {value}", "purple")
+                self.refresh_ui()
+                return
+
+            # Type "data"
             sender = msg["sender"]
             clock = msg["clock"]
             key = msg["key"]
@@ -247,15 +266,33 @@ class NodeApp:
                     conflict = True
 
             if conflict:
-                self.log_event(f"⚠️ Conflit sur '{key}' avec {sender}. Remplacement par la version reçue.", "red")
-                messagebox.showwarning("Conflit détecté", f"Conflit sur la clé '{key}' avec {sender}")
-                self.data[key] = {"value": value, "clock": clock}
+                # Fenêtre modale pour choix utilisateur (bloquante)
+                choice = self.ask_user_conflict(
+                    key,
+                    self.data[key]["value"], self.data[key]["clock"],
+                    value, clock
+                )
+                if choice == "local":
+                    self.log_event(f"⚠️ Conflit sur '{key}': conservé localement.", "orange")
+                    # Propager la résolution locale à pairs (forcer à garder local)
+                    res_msg = create_conflict_resolution_message(self.node_id, key,
+                        self.data[key]["value"], self.data[key]["clock"], password=self.password)
+                else:
+                    self.data[key] = {"value": value, "clock": clock}
+                    self.log_event(f"⚠️ Conflit sur '{key}': remplacé par la version distante.", "red")
+                    res_msg = create_conflict_resolution_message(self.node_id, key, value, clock, password=self.password)
+
+                self.refresh_ui()
+
+                # Propager la résolution aux pairs
+                for peer_name, (host, port) in self.peers.items():
+                    self.send_message(host, port, res_msg)
+
             else:
                 self.vc.update(clock)
                 self.data[key] = {"value": value, "clock": clock}
                 self.log_event(f"✅ Donnée reçue : {key} = {value} de {sender}", "green")
-
-            self.refresh_ui()
+                self.refresh_ui()
 
     def happens_after(self, c1, c2):
         return all(c1.get(k, 0) >= c2.get(k, 0) for k in c1) and any(c1.get(k, 0) > c2.get(k, 0) for k in c1)
@@ -369,6 +406,52 @@ class NodeApp:
         for peer_name, (host, port) in self.peers.items():
             self.send_message(host, port, msg)
 
+    # --- Fenêtre modale pour conflit ---
+    def ask_user_conflict(self, key, local_value, local_clock, remote_value, remote_clock):
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"Conflit détecté sur '{key}'")
+
+        ttk.Label(dlg, text="Valeur locale :").pack(anchor="w", padx=10, pady=(10,0))
+        ttk.Label(dlg, text=f"{local_value} (horloge: {local_clock})", foreground="blue").pack(anchor="w", padx=20)
+
+        ttk.Label(dlg, text="Valeur distante :").pack(anchor="w", padx=10, pady=(10,0))
+        ttk.Label(dlg, text=f"{remote_value} (horloge: {remote_clock})", foreground="green").pack(anchor="w", padx=20)
+
+        choice = tk.StringVar(value="")
+
+        def keep_local():
+            choice.set("local")
+            dlg.destroy()
+
+        def keep_remote():
+            choice.set("remote")
+            dlg.destroy()
+
+        frm_buttons = ttk.Frame(dlg)
+        frm_buttons.pack(pady=15)
+        ttk.Button(frm_buttons, text="Garder local", command=keep_local).pack(side="left", padx=10)
+        ttk.Button(frm_buttons, text="Garder distant", command=keep_remote).pack(side="right", padx=10)
+
+        dlg.grab_set()
+        self.root.wait_window(dlg)
+        return choice.get()
+
+    # --- Modifier mot de passe ---
+    def change_password(self):
+        new_pass = self.pass_entry.get().strip()
+        if not new_pass:
+            messagebox.showinfo("Erreur", "Le mot de passe ne peut pas être vide.")
+            self.pass_entry.delete(0, tk.END)
+            self.pass_entry.insert(0, self.password)
+            return
+        if new_pass == self.password:
+            messagebox.showinfo("Info", "Le mot de passe est déjà celui-ci.")
+            return
+        self.password = new_pass
+        self.log_event("🔐 Mot de passe modifié localement.", "blue")
+        messagebox.showinfo("Info", "Mot de passe modifié localement.")
+        self.save_config()
+
 # --- Fenêtre modale pour ajouter/modifier un peer ---
 class PeerDialog(simpledialog.Dialog):
     def __init__(self, parent, title, name="", ip="", port=""):
@@ -411,23 +494,6 @@ class PeerDialog(simpledialog.Dialog):
 
     def apply(self):
         self.result = (self.e_name.get().strip(), self.e_ip.get().strip(), self.e_port.get().strip())
-
-# --- Modifier mot de passe ---
-def change_password(self):
-    new_pass = self.pass_entry.get().strip()
-    if not new_pass:
-        messagebox.showinfo("Erreur", "Le mot de passe ne peut pas être vide.")
-        self.pass_entry.delete(0, tk.END)
-        self.pass_entry.insert(0, self.password)
-        return
-    if new_pass == self.password:
-        messagebox.showinfo("Info", "Le mot de passe est déjà celui-ci.")
-        return
-    self.password = new_pass
-    self.log_event("🔐 Mot de passe modifié localement.", "blue")
-    self.save_config()
-
-NodeApp.change_password = change_password
 
 if __name__ == "__main__":
     root = tk.Tk()
