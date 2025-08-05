@@ -1,12 +1,9 @@
 {
-  "name": "Mario",
-  "port": 5000,
-  "peers": {
-    "Todisoa": [
-      "192.168.137.105",
-      5001
-    ]
-  },
-  "password": "simpleauth",
-  "node_id": "Mario"
-}
+    "node_id": "Mario",
+    "port": 5000,
+    "password": "secret",
+    "peers": {
+      "Todisoa": ["192.168.137.105", 5001]
+    }
+  }
+  
