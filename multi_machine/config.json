@@ -1,0 +1,9 @@
+{
+    "name": "Mario",
+    "port": 5000,
+    "peers": {
+      "Todisoa": ["192.168.137.105", 5001]
+    },
+    "password": "simpleauth"
+  }
+  
