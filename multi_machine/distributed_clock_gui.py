@@ -1,212 +1,147 @@
+import tkinter as tk
+from tkinter import simpledialog, messagebox
 import socket
 import threading
-import tkinter as tk
 import json
-import os
 import time
+import os
 
-# ==========================
-# CONFIGURATION DU SYSTÈME
-# ==========================
+# --- Chargement de la configuration ---
+CONFIG_FILE = 'config.json'
+with open(CONFIG_FILE) as f:
+    config = json.load(f)
 
-CONFIG_FILE = "config.json"
-STATE_FILE = "state.json"
+NAME = config['name']
+PORT = config['port']
+PEERS = config['peers']  # {name: [ip, port]}
+PASSWORD = config['password']
 
-# Exemple de config.json attendu :
-# {
-#   "name": "A",
-#   "port": 5000,
-#   "peers": {
-#     "B": ["192.168.1.11", 5001],
-#     "C": ["192.168.1.12", 5002]
-#   },
-#   "password": "simpleauth"
-# }
+DATA_FILE = f"{NAME}_data.json"
 
-with open(CONFIG_FILE, 'r') as f:
-    CONFIG = json.load(f)
-
-# ==========================
-# CLASSE HORLOGE VECTORIELLE
-# ==========================
-
+# --- Horloge vectorielle ---
 class VectorClock:
-    def __init__(self, name, peers):
-        self.name = name
-        self.clock = {name: 0}
-        for peer in peers:
-            self.clock[peer] = 0
-        self.history = []
+    def __init__(self, peers):
+        self.clock = {peer: 0 for peer in peers}
+        self.clock[NAME] = 0
 
-    def tick(self):
-        self.clock[self.name] += 1
-        self.log_event("Local event")
+    def increment(self):
+        self.clock[NAME] += 1
 
-    def update(self, incoming_clock):
-        for peer, time in incoming_clock.items():
-            self.clock[peer] = max(self.clock.get(peer, 0), time)
-        self.clock[self.name] += 1
-        self.log_event("Received event")
+    def update(self, received):
+        for k in received:
+            self.clock[k] = max(self.clock.get(k, 0), received[k])
+        self.increment()
 
-    def log_event(self, event_type):
-        snapshot = self.clock.copy()
-        self.history.append((event_type, snapshot))
+    def get(self):
+        return dict(self.clock)
 
-    def to_dict(self):
-        return self.clock
+# --- Persistance ---
+def save_state(history, clock):
+    with open(DATA_FILE, 'w') as f:
+        json.dump({
+            'history': history,
+            'clock': clock.get()
+        }, f)
 
-    def load_state(self, state):
-        self.clock = state.get("clock", self.clock)
-        self.history = state.get("history", self.history)
+def load_state():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE) as f:
+            data = json.load(f)
+            return data['history'], data['clock']
+    return [], {}
 
-    def save_state(self):
-        return {"clock": self.clock, "history": self.history}
+# --- Envoi réseau sécurisé ---
+def send_to_peer(peer_name, message_data):
+    ip, port = PEERS[peer_name]
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(5)
+            s.connect((ip, port))
+            s.sendall(json.dumps(message_data).encode())
+    except:
+        print(f"⚠️ Peer {peer_name} injoignable")
 
-# ==========================
-# COMMUNICATION RÉSEAU
-# ==========================
+# --- Réception réseau ---
+def server_thread():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(('', PORT))
+        server.listen()
+        print(f"[{NAME}] En attente sur le port {PORT}...")
 
-class NetworkHandler:
-    def __init__(self, clock, display_callback):
-        self.clock = clock
-        self.display_callback = display_callback
-        self.running = True
+        while True:
+            conn, addr = server.accept()
+            threading.Thread(target=handle_client, args=(conn,)).start()
 
-        self.peers = CONFIG["peers"]
-        self.port = CONFIG["port"]
-        self.password = CONFIG["password"]
-
-        self.server_thread = threading.Thread(target=self.run_server, daemon=True)
-        self.server_thread.start()
-
-    def run_server(self):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("", self.port))
-        s.listen()
-
-        while self.running:
-            try:
-                conn, addr = s.accept()
-                threading.Thread(target=self.handle_connection, args=(conn,), daemon=True).start()
-            except:
-                continue
-
-    def handle_connection(self, conn):
+def handle_client(conn):
+    with conn:
+        data = conn.recv(4096).decode()
         try:
-            data = conn.recv(4096).decode()
-            msg = json.loads(data)
-            if msg.get("password") != self.password:
-                conn.close()
-                return
-            if "clock" in msg:
-                self.clock.update(msg["clock"])
-                self.display_callback()
-        except Exception as e:
-            print("Erreur réseau:", e)
-        finally:
-            conn.close()
-
-    def send_to_peer(self, peer_name):
-        if peer_name not in self.peers:
+            message = json.loads(data)
+        except:
             return
 
-        ip, port = self.peers[peer_name]
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2)
-            s.connect((ip, port))
-            msg = {
-                "password": self.password,
-                "clock": self.clock.to_dict()
-            }
-            s.send(json.dumps(msg).encode())
-            s.close()
-        except:
-            self.display_callback(f"[!] Impossible de joindre {peer_name} — retrying dans 5s")
-            # Relance automatique après 5 secondes
-            threading.Timer(5, self.send_to_peer, args=(peer_name,)).start()
+        # Authentification
+        if message.get('password') != PASSWORD:
+            print("🔒 Authentification échouée.")
+            return
 
-# ==========================
-# SAUVEGARDE/CHARGEMENT
-# ==========================
+        sender = message['sender']
+        text = message['text']
+        remote_clock = message['clock']
 
-def save_local_state(clock):
-    with open(STATE_FILE, "w") as f:
-        json.dump(clock.save_state(), f)
+        clock.update(remote_clock)
+        history.append((sender, text, clock.get()))
+        save_state(history, clock)
+        update_gui()
 
-def load_local_state(clock):
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            state = json.load(f)
-            clock.load_state(state)
+# --- GUI ---
+def send_message():
+    text = input_field.get()
+    if not text:
+        return
 
-# ==========================
-# INTERFACE GRAPHIQUE
-# ==========================
+    clock.increment()
+    history.append((NAME, text, clock.get()))
+    save_state(history, clock)
+    update_gui()
 
-class ClockGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title(f"Node {CONFIG['name']} - Vector Clock")
+    for peer in PEERS:
+        send_to_peer(peer, {
+            'sender': NAME,
+            'text': text,
+            'clock': clock.get(),
+            'password': PASSWORD
+        })
+    input_field.delete(0, tk.END)
 
-        self.clock = VectorClock(CONFIG["name"], CONFIG["peers"].keys())
-        load_local_state(self.clock)
+def update_gui():
+    text_display.config(state=tk.NORMAL)
+    text_display.delete(1.0, tk.END)
+    for sender, text, clk in history:
+        text_display.insert(tk.END, f"[{sender}] {text} {clk}\n")
+    text_display.config(state=tk.DISABLED)
 
-        self.network = NetworkHandler(self.clock, self.update_display)
+# --- Initialisation ---
+history, saved_clock = load_state()
+clock = VectorClock(list(PEERS.keys()))
+if saved_clock:
+    clock.clock.update(saved_clock)
 
-        self.label = tk.Label(root, text="", font=("Courier", 14), justify="left")
-        self.label.pack(padx=10, pady=10)
+# --- Démarrage serveur ---
+threading.Thread(target=server_thread, daemon=True).start()
 
-        self.event_button = tk.Button(root, text="🔄 Événement local", command=self.local_event)
-        self.event_button.pack(fill='x', padx=10, pady=5)
+# --- Interface graphique ---
+root = tk.Tk()
+root.title(f"Horloge Vectorielle - {NAME}")
 
-        for peer in CONFIG["peers"]:
-            b = tk.Button(root, text=f"📡 Envoyer à {peer}", command=lambda p=peer: self.send_event(p))
-            b.pack(fill='x', padx=10, pady=2)
+text_display = tk.Text(root, state=tk.DISABLED, width=60, height=20)
+text_display.pack(padx=10, pady=10)
 
-        self.save_button = tk.Button(root, text="💾 Sauvegarder", command=self.save)
-        self.save_button.pack(fill='x', padx=10, pady=5)
+input_field = tk.Entry(root, width=50)
+input_field.pack(side=tk.LEFT, padx=(10, 0), pady=(0, 10))
 
-        self.history_button = tk.Button(root, text="🕓 Afficher historique", command=self.show_history)
-        self.history_button.pack(fill='x', padx=10, pady=5)
+send_button = tk.Button(root, text="Envoyer", command=send_message)
+send_button.pack(side=tk.LEFT, padx=10, pady=(0, 10))
 
-        self.msg_label = tk.Label(root, text="", fg="red")
-        self.msg_label.pack()
-
-        self.update_display()
-
-    def update_display(self, msg=None):
-        s = f"Horloge vectorielle :\n{json.dumps(self.clock.to_dict(), indent=2)}"
-        self.label.config(text=s)
-        if msg:
-            self.msg_label.config(text=msg)
-
-    def local_event(self):
-        self.clock.tick()
-        self.update_display()
-
-    def send_event(self, peer):
-        self.clock.tick()
-        self.network.send_to_peer(peer)
-        self.update_display(f"📤 Horloge envoyée à {peer}")
-
-    def save(self):
-        save_local_state(self.clock)
-        self.update_display("💾 État sauvegardé localement.")
-
-    def show_history(self):
-        top = tk.Toplevel()
-        top.title("Historique des événements")
-        txt = tk.Text(top, width=60, height=20)
-        txt.pack()
-        for event, clk in self.clock.history:
-            txt.insert(tk.END, f"{event} : {clk}\n")
-
-# ==========================
-# LANCEMENT
-# ==========================
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = ClockGUI(root)
-    root.mainloop()
+update_gui()
+root.mainloop()
