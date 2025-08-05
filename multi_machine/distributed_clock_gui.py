@@ -84,6 +84,8 @@ class NodeApp:
         self.vc = VectorClock(self.node_id, self.all_nodes)
         self.data = {}
 
+        self.conflict_windows = {}  # Ajouté : dictionnaire pour gérer les fenêtres de conflit ouvertes
+
         self.setup_ui()
         threading.Thread(target=self.listen, daemon=True).start()
 
@@ -408,23 +410,39 @@ class NodeApp:
 
     # --- Fenêtre modale pour conflit ---
     def ask_user_conflict(self, key, local_value, local_clock, remote_value, remote_clock):
+        # Fermeture de toutes les autres fenêtres conflit ouvertes dès qu'un choix est fait
+        if key in self.conflict_windows:
+            existing_win = self.conflict_windows[key]
+            existing_win.lift()
+            self.root.wait_window(existing_win)
+            existing_win.destroy()
+            del self.conflict_windows[key]
+
         dlg = tk.Toplevel(self.root)
         dlg.title(f"Conflit détecté sur '{key}'")
 
-        ttk.Label(dlg, text="Valeur locale :").pack(anchor="w", padx=10, pady=(10,0))
+        ttk.Label(dlg, text="Valeur locale :").pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Label(dlg, text=f"{local_value} (horloge: {local_clock})", foreground="blue").pack(anchor="w", padx=20)
 
-        ttk.Label(dlg, text="Valeur distante :").pack(anchor="w", padx=10, pady=(10,0))
+        ttk.Label(dlg, text="Valeur distante :").pack(anchor="w", padx=10, pady=(10, 0))
         ttk.Label(dlg, text=f"{remote_value} (horloge: {remote_clock})", foreground="green").pack(anchor="w", padx=20)
 
         choice = tk.StringVar(value="")
 
+        def close_all_conflict_windows():
+            for k, win in list(self.conflict_windows.items()):
+                if win is not dlg:
+                    win.destroy()
+                    del self.conflict_windows[k]
+
         def keep_local():
             choice.set("local")
+            close_all_conflict_windows()
             dlg.destroy()
 
         def keep_remote():
             choice.set("remote")
+            close_all_conflict_windows()
             dlg.destroy()
 
         frm_buttons = ttk.Frame(dlg)
@@ -433,9 +451,14 @@ class NodeApp:
         ttk.Button(frm_buttons, text="Garder distant", command=keep_remote).pack(side="right", padx=10)
 
         dlg.grab_set()
+        self.conflict_windows[key] = dlg
         self.root.wait_window(dlg)
-        return choice.get()
 
+        if key in self.conflict_windows:
+            del self.conflict_windows[key]
+
+        return choice.get()
+    
     # --- Modifier mot de passe ---
     def change_password(self):
         new_pass = self.pass_entry.get().strip()
