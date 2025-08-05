@@ -22,7 +22,6 @@ class VectorClock:
     def happens_before(self, other_clock):
         return all(self.clock.get(k, 0) <= other_clock.get(k, 0) for k in other_clock) and any(self.clock.get(k, 0) < other_clock.get(k, 0) for k in other_clock)
 
-
     def to_dict(self):
         return self.clock.copy()
 

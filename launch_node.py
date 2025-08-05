@@ -15,7 +15,6 @@ if __name__ == '__main__':
     }
 
     all_node_ids = list(nodes.keys())
-
     processes = []
     for node_id, config in nodes.items():
         p = Process(target=start_node, args=(node_id, all_node_ids, config['port'], config['peers']))
